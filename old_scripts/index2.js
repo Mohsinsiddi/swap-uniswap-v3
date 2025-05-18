@@ -1,9 +1,9 @@
 import { ethers } from 'ethers';
-import FACTORY_ABI from './abis/factory.json' assert { type: 'json' };
-import QUOTER_ABI from './abis/quoter.json' assert { type: 'json' };
-import SWAP_ROUTER_ABI from './abis/swaprouter.json' assert { type: 'json' };
-import POOL_ABI from './abis/pool.json' assert { type: 'json' };
-import TOKEN_IN_ABI from './abis/weth.json' assert { type: 'json' };
+import FACTORY_ABI from '../abis/factory.json' assert { type: 'json' };
+import QUOTER_ABI from '../abis/quoter.json' assert { type: 'json' };
+import SWAP_ROUTER_ABI from '../abis/swaprouter.json' assert { type: 'json' };
+import POOL_ABI from '../abis/pool.json' assert { type: 'json' };
+import TOKEN_IN_ABI from '../abis/weth.json' assert { type: 'json' };
 import 'dotenv/config';
 
 // ========================
@@ -13,15 +13,9 @@ import 'dotenv/config';
 const RPC_URL = 'http://127.0.0.1:8545';
 const EXPLORER_URL = 'https://sepolia.etherscan.io';
 
-// Configuration Constants
-// ========================
 // Swap Amount Configuration
-const SWAP_AMOUNT = 0.01; // Reduced to an even smaller amount for testing
+const SWAP_AMOUNT = 0.1; // Start with a small amount for testing
 const SLIPPAGE_TOLERANCE = 0.05; // 5% slippage tolerance
-
-// Additional Configuration Options
-const DEBUG_MODE = true; // Enable extra logging
-const TRY_EXACT_OUTPUT = true; // If true, try exactOutputSingle if exactInputSingle fails
 
 // Contract Addresses
 const POOL_FACTORY_CONTRACT_ADDRESS = '0x0227628f3F023bb0B980b67D528571c95c6DaC1c';
@@ -41,7 +35,7 @@ const signer = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
 // ========================
 const WETH = {
   chainId: 11155111,
-  address: '0xb0a61F0dB0a24393DaaF5DE9A4164A22f79c49d6',
+  address: '0xfff9976782d46cc05630d1f6ebab18b2324d6b14',
   decimals: 18,
   symbol: 'WETH',
   name: 'Wrapped Ether',
@@ -52,7 +46,7 @@ const WETH = {
 
 const USDC = {
   chainId: 11155111,
-  address: '0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8',
+  address: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238',
   decimals: 6,
   symbol: 'USDC',
   name: 'USD//C',
@@ -362,81 +356,6 @@ async function getQuote(quoterContract, params) {
   }
 }
 
-// Try exactOutputSingle swap
-async function tryExactOutputSwap(quoterContract, swapRouter, poolInfo, desiredOutputAmount, signer) {
-  try {
-    log(`Trying exactOutputSingle swap instead...`);
-    
-    // Convert output amount to proper decimal format
-    const amountOut = ethers.parseUnits(desiredOutputAmount.toString(), USDC.decimals);
-    
-    // Get quote for exact output
-    log(`Getting quote for exactOutputSingle...`);
-    const quoteParams = {
-      tokenIn: WETH.address,
-      tokenOut: USDC.address,
-      fee: poolInfo.fee,
-      recipient: signer.address,
-      amountOut: amountOut,
-      sqrtPriceLimitX96: BigInt(0)
-    };
-    
-    const quotedResult = await quoterContract.quoteExactOutputSingle.staticCall(quoteParams);
-    const amountInMaximum = quotedResult[0];
-    
-    // Add slippage to max input amount
-    const slippageFactor = BigInt(Math.floor((1 + SLIPPAGE_TOLERANCE) * 1000));
-    const adjustedAmountInMaximum = (amountInMaximum * slippageFactor) / BigInt(1000);
-    
-    log(`Quote for exactOutputSingle:`, {
-      amountOut: formatBigInt(amountOut, USDC.decimals),
-      amountInMaximum: formatBigInt(amountInMaximum, WETH.decimals),
-      adjustedAmountInMaximum: formatBigInt(adjustedAmountInMaximum, WETH.decimals)
-    });
-    
-    // Prepare swap parameters
-    const swapParams = {
-      tokenIn: WETH.address,
-      tokenOut: USDC.address,
-      fee: poolInfo.fee,
-      recipient: signer.address,
-      deadline: Math.floor(Date.now() / 1000 + 60 * 10),
-      amountOut: amountOut,
-      amountInMaximum: adjustedAmountInMaximum,
-      sqrtPriceLimitX96: BigInt(0)
-    };
-    
-    log(`Preparing exactOutputSingle transaction...`);
-    
-    // Approve enough tokens
-    await approveToken(WETH.address, TOKEN_IN_ABI, adjustedAmountInMaximum, signer);
-    
-    // Populate transaction
-    const transaction = await swapRouter.exactOutputSingle.populateTransaction(swapParams);
-    
-    // Add gas limit
-    const txWithGas = {
-      ...transaction,
-      gasLimit: ethers.parseUnits('1000000', 'wei'),
-    };
-    
-    log(`Sending exactOutputSingle transaction...`);
-    const transactionResponse = await signer.sendTransaction(txWithGas);
-    
-    log(`ExactOutputSingle Transaction Sent: ${EXPLORER_URL}/txn/${transactionResponse.hash}`);
-    
-    log(`Waiting for transaction confirmation...`);
-    const receipt = await transactionResponse.wait();
-    
-    log(`ExactOutputSingle Transaction Confirmed: ${EXPLORER_URL}/txn/${receipt.hash}`);
-    
-    return receipt;
-  } catch (error) {
-    logError('ExactOutputSingle swap failed', error);
-    throw new Error('ExactOutputSingle swap failed');
-  }
-}
-
 // ========================
 // SWAP EXECUTION FUNCTIONS
 // ========================
@@ -446,113 +365,32 @@ async function executeSwap(swapRouter, params, signer) {
   try {
     log(`Preparing swap transaction...`, params);
     
-    // First, try to estimate gas
-    try {
-      log(`Estimating gas for swap transaction...`);
-      const gasEstimate = await swapRouter.exactInputSingle.estimateGas(params);
-      log(`Gas estimate: ${gasEstimate.toString()}`);
-      
-      // Add 30% buffer to gas estimate
-      const gasLimit = gasEstimate * BigInt(130) / BigInt(100);
-      log(`Using gas limit: ${gasLimit.toString()}`);
-      
-      // Populate transaction
-      const transaction = await swapRouter.exactInputSingle.populateTransaction(params);
-      
-      // Add gas limit
-      const txWithGas = {
-        ...transaction,
-        gasLimit: gasLimit,
-      };
-      
-      log(`Sending swap transaction...`);
-      const transactionResponse = await signer.sendTransaction(txWithGas);
-      
-      log(`Swap Transaction Sent: ${EXPLORER_URL}/txn/${transactionResponse.hash}`);
-      
-      log(`Waiting for transaction confirmation...`);
-      const receipt = await transactionResponse.wait();
-      
-      log(`Swap Transaction Confirmed: ${EXPLORER_URL}/txn/${receipt.hash}`);
-      
-      return receipt;
-    } catch (gasError) {
-      // If gas estimation fails, log error and try with fixed gas limit
-      logError('Gas estimation failed, using fixed gas limit', gasError);
-      
-      // Populate transaction
-      const transaction = await swapRouter.exactInputSingle.populateTransaction(params);
-      
-      // Add high fixed gas limit
-      const txWithGas = {
-        ...transaction,
-        gasLimit: ethers.parseUnits('1000000', 'wei'),
-      };
-      
-      log(`Sending swap transaction with fixed gas limit...`);
-      const transactionResponse = await signer.sendTransaction(txWithGas);
-      
-      log(`Swap Transaction Sent: ${EXPLORER_URL}/txn/${transactionResponse.hash}`);
-      
-      log(`Waiting for transaction confirmation...`);
-      const receipt = await transactionResponse.wait();
-      
-      log(`Swap Transaction Confirmed: ${EXPLORER_URL}/txn/${receipt.hash}`);
-      
-      return receipt;
-    }
+    // Populate transaction
+    const transaction = await swapRouter.exactInputSingle.populateTransaction(params);
+    
+    // Add gas limit
+    const txWithGas = {
+      ...transaction,
+      gasLimit: ethers.parseUnits('500000', 'wei'),
+    };
+    
+    log(`Sending swap transaction...`);
+    const transactionResponse = await signer.sendTransaction(txWithGas);
+    
+    log(`Swap Transaction Sent: ${EXPLORER_URL}/txn/${transactionResponse.hash}`);
+    
+    log(`Waiting for transaction confirmation...`);
+    const receipt = await transactionResponse.wait();
+    
+    log(`Swap Transaction Confirmed: ${EXPLORER_URL}/txn/${receipt.hash}`);
+    
+    return receipt;
   } catch (error) {
     logError('Swap execution failed', error);
     
     // If there's a transaction hash in the error, log it
     if (error.transactionHash) {
       log(`Failed Transaction: ${EXPLORER_URL}/txn/${error.transactionHash}`);
-    }
-    
-    // Check if this is a "Transaction reverted without a reason string" error
-    if (error.message && error.message.includes('Transaction reverted without a reason')) {
-      // Try to get more context by checking if the pool has sufficient liquidity for this swap
-      log(`Detected "Transaction reverted without a reason" error. Performing additional diagnostics...`);
-      
-      try {
-        // Get the pool contract
-        const poolAddress = await factoryContract.getPool(params.tokenIn, params.tokenOut, params.fee);
-        const poolContract = new ethers.Contract(poolAddress, POOL_ABI, provider);
-        
-        // Check current liquidity
-        const liquidity = await poolContract.liquidity();
-        log(`Current pool liquidity: ${liquidity.toString()}`);
-        
-        // Try smaller amount - reduce by 90%
-        const smallerAmount = params.amountIn * BigInt(10) / BigInt(100);
-        log(`Trying to get quote for smaller amount: ${formatBigInt(smallerAmount, WETH.decimals)} WETH`);
-        
-        try {
-          const smallerQuote = await quoterContract.quoteExactInputSingle.staticCall({
-            tokenIn: params.tokenIn,
-            tokenOut: params.tokenOut,
-            fee: params.fee,
-            amountIn: smallerAmount,
-            sqrtPriceLimitX96: BigInt(0)
-          });
-          
-          log(`Quote for smaller amount: ${formatBigInt(smallerQuote[0], USDC.decimals)} USDC`);
-          log(`DIAGNOSTIC: Smaller amount quote successful, likely issue is with swap amount/price impact`);
-        } catch (smallerQuoteError) {
-          logError('Even smaller quote failed', smallerQuoteError);
-          log(`DIAGNOSTIC: Both large and small quotes failing, likely issue with pool configuration`);
-        }
-      } catch (diagnosticError) {
-        logError('Diagnostic checks failed', diagnosticError);
-      }
-      
-      log(`
-LIKELY ISSUES:
-1. Insufficient liquidity for swap amount
-2. Price impact too high (try smaller amount)
-3. Pool configuration issue - check token ordering and fee
-4. Router configuration issue - check router address and permissions
-      `);
     }
     
     throw new Error('Swap transaction failed');
@@ -571,6 +409,8 @@ async function main(swapAmount) {
     const initialBalances = await logBalances(signer);
     
     // Convert input amount to BigInt
+
+    await wrapEthToWeth(signer, swapAmount);
     const inputAmount = swapAmount;
     const amountIn = ethers.parseUnits(inputAmount.toString(), WETH.decimals);
     
@@ -604,15 +444,8 @@ async function main(swapAmount) {
     
     // Calculate minimum amount out with slippage protection
     // Convert slippage percentage to factor (e.g., 5% -> 0.95)
-    const slippageFactor = BigInt(Math.floor((1 - SLIPPAGE_TOLERANCE) * 1000));
-    const amountOutMinimum = (quotedAmountOut * slippageFactor) / BigInt(1000);
-    
-    // Ensure amountOutMinimum is never zero
-    if (amountOutMinimum === BigInt(0)) {
-      log(`WARNING: Calculated amountOutMinimum is zero. Setting to a minimum value.`);
-      // Set to a very small value (1 unit in the smallest denomination)
-      amountOutMinimum = BigInt(1);
-    }
+    const slippageFactor = BigInt(Math.floor((1 - SLIPPAGE_TOLERANCE) * 1000)) / BigInt(1000);
+    const amountOutMinimum = (quotedAmountOut * slippageFactor) / BigInt(1);
     
     log(`Quote details:`, {
       amountIn: formatBigInt(amountIn, WETH.decimals),
@@ -632,13 +465,6 @@ async function main(swapAmount) {
       amountOutMinimum: amountOutMinimum,
       sqrtPriceLimitX96: BigInt(0)
     };
-    
-    log(`Final swap parameters:`, {
-      ...swapParams,
-      amountIn: formatBigInt(amountIn, WETH.decimals),
-      amountOutMinimum: formatBigInt(amountOutMinimum, USDC.decimals),
-      deadline: new Date(swapParams.deadline * 1000).toISOString()
-    });
     
     // Initialize swap router contract
     const swapRouter = new ethers.Contract(SWAP_ROUTER_CONTRACT_ADDRESS, SWAP_ROUTER_ABI, signer);
