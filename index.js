@@ -3,7 +3,7 @@ import FACTORY_ABI from './abis/factory.json' assert { type: 'json' };
 import QUOTER_ABI from './abis/quoter.json' assert { type: 'json' };
 import SWAP_ROUTER_ABI from './abis/swaprouter.json' assert { type: 'json' };
 import POOL_ABI from './abis/pool.json' assert { type: 'json' };
-import TOKEN_IN_ABI from './abis/weth.json' assert { type: 'json' };
+import TOKEN_ABI from './abis/weth.json' assert { type: 'json' };
 import 'dotenv/config';
 
 // ========================
@@ -16,7 +16,7 @@ const EXPLORER_URL = 'https://sepolia.etherscan.io';
 // Configuration Constants
 // ========================
 // Swap Amount Configuration
-const SWAP_AMOUNT = 0.01; // Reduced to an even smaller amount for testing
+const SWAP_AMOUNT = 10; // Reduced to an even smaller amount for testing
 const SLIPPAGE_TOLERANCE = 0.05; // 5% slippage tolerance
 
 // Additional Configuration Options
@@ -28,6 +28,13 @@ const POOL_FACTORY_CONTRACT_ADDRESS = '0x0227628f3F023bb0B980b67D528571c95c6DaC1
 const QUOTER_CONTRACT_ADDRESS = '0xEd1f6473345F45b75F8179591dd5bA1888cf2FB3';
 const SWAP_ROUTER_CONTRACT_ADDRESS = '0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E';
 
+// Token Addresses - Only thing needed to start a swap
+const TOKEN_IN_ADDRESS = '0xb0a61F0dB0a24393DaaF5DE9A4164A22f79c49d6';
+const TOKEN_OUT_ADDRESS = '0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8';
+
+// Chain ID
+const CHAIN_ID = 11155111; // Sepolia
+
 // ========================
 // PROVIDER & CONTRACT SETUP
 // ========================
@@ -35,31 +42,6 @@ const provider = new ethers.JsonRpcProvider(RPC_URL);
 const factoryContract = new ethers.Contract(POOL_FACTORY_CONTRACT_ADDRESS, FACTORY_ABI, provider);
 const quoterContract = new ethers.Contract(QUOTER_CONTRACT_ADDRESS, QUOTER_ABI, provider);
 const signer = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
-
-// ========================
-// TOKEN CONFIGURATION
-// ========================
-const WETH = {
-  chainId: 11155111,
-  address: '0xb0a61F0dB0a24393DaaF5DE9A4164A22f79c49d6',
-  decimals: 18,
-  symbol: 'WETH',
-  name: 'Wrapped Ether',
-  isToken: true,
-  isNative: true,
-  wrapped: true,
-};
-
-const USDC = {
-  chainId: 11155111,
-  address: '0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8',
-  decimals: 6,
-  symbol: 'USDC',
-  name: 'USD//C',
-  isToken: true,
-  isNative: true,
-  wrapped: false,
-};
 
 // ========================
 // DEBUGGING & LOGGING HELPERS
@@ -95,31 +77,67 @@ function formatBigInt(value, decimals) {
 }
 
 // ========================
+// TOKEN INFO HELPERS
+// ========================
+
+// Fetch token information
+async function fetchTokenInfo(tokenAddress) {
+  try {
+    log(`Fetching token info for address: ${tokenAddress}`);
+    
+    const tokenContract = new ethers.Contract(tokenAddress, TOKEN_ABI, provider);
+    
+    // Fetch token details
+    const [symbol, name, decimals] = await Promise.all([
+      tokenContract.symbol(),
+      tokenContract.name(),
+      tokenContract.decimals()
+    ]);
+    
+    const tokenInfo = {
+      chainId: CHAIN_ID,
+      address: tokenAddress,
+      decimals: Number(decimals),
+      symbol: symbol,
+      name: name,
+      isToken: true,
+    };
+    
+    log(`Token info retrieved:`, tokenInfo);
+    
+    return tokenInfo;
+  } catch (error) {
+    logError(`Error fetching token info for ${tokenAddress}`, error);
+    throw new Error(`Failed to retrieve token info for ${tokenAddress}`);
+  }
+}
+
+// ========================
 // BALANCE CHECKING FUNCTIONS
 // ========================
 
 // Check all relevant token balances
-async function logBalances(wallet) {
+async function logBalances(wallet, tokenIn, tokenOut) {
   try {
     log(`Checking wallet balances for ${wallet.address}...`);
     
-    const wethContract = new ethers.Contract(WETH.address, TOKEN_IN_ABI, provider);
-    const usdcContract = new ethers.Contract(USDC.address, TOKEN_IN_ABI, provider);
+    const tokenInContract = new ethers.Contract(tokenIn.address, TOKEN_ABI, provider);
+    const tokenOutContract = new ethers.Contract(tokenOut.address, TOKEN_ABI, provider);
     
-    const [wethBalance, usdcBalance, ethBalance] = await Promise.all([
-      wethContract.balanceOf(wallet.address),
-      usdcContract.balanceOf(wallet.address),
+    const [tokenInBalance, tokenOutBalance, ethBalance] = await Promise.all([
+      tokenInContract.balanceOf(wallet.address),
+      tokenOutContract.balanceOf(wallet.address),
       provider.getBalance(wallet.address),
     ]);
 
     const balances = {
       ETH: formatBigInt(ethBalance, 18),
-      [WETH.symbol]: formatBigInt(wethBalance, WETH.decimals),
-      [USDC.symbol]: formatBigInt(usdcBalance, USDC.decimals)
+      [tokenIn.symbol]: formatBigInt(tokenInBalance, tokenIn.decimals),
+      [tokenOut.symbol]: formatBigInt(tokenOutBalance, tokenOut.decimals)
     };
     
     log(`Wallet Balances for ${wallet.address}:`, balances);
-    return { wethBalance, usdcBalance, ethBalance };
+    return { tokenInBalance, tokenOutBalance, ethBalance };
   } catch (error) {
     logError('Error fetching balances', error);
     throw new Error('Failed to check balances');
@@ -130,12 +148,12 @@ async function logBalances(wallet) {
 // TOKEN WRAPPING FUNCTIONS
 // ========================
 
-// Wrap ETH to WETH
-async function wrapEthToWeth(wallet, ethAmount) {
+// Wrap ETH to WETH (only needed for WETH tokens)
+async function wrapEthToWeth(wallet, ethAmount, wethAddress) {
   try {
     log(`Wrapping ${ethAmount} ETH to WETH...`);
     
-    const wethContract = new ethers.Contract(WETH.address, TOKEN_IN_ABI, wallet);
+    const wethContract = new ethers.Contract(wethAddress, TOKEN_ABI, wallet);
     const ethToWrap = ethers.parseEther(ethAmount.toString());
     
     // Check ETH balance
@@ -163,9 +181,8 @@ async function wrapEthToWeth(wallet, ethAmount) {
     log(`Wrap Transaction Confirmed: ${EXPLORER_URL}/txn/${receipt.hash}`);
     
     // Log new WETH balance
-    const wethContractView = new ethers.Contract(WETH.address, TOKEN_IN_ABI, provider);
-    const wethBalance = await wethContractView.balanceOf(wallet.address);
-    log(`New WETH Balance: ${formatBigInt(wethBalance, WETH.decimals)} ${WETH.symbol}`);
+    const wethBalance = await wethContract.balanceOf(wallet.address);
+    log(`New WETH Balance: ${formatBigInt(wethBalance, 18)} WETH`);
     
     return receipt;
   } catch (error) {
@@ -179,38 +196,38 @@ async function wrapEthToWeth(wallet, ethAmount) {
 // ========================
 
 // Check token balance
-async function checkBalance(tokenAddress, tokenDecimals, tokenSymbol, wallet) {
+async function checkBalance(tokenInfo, wallet) {
   try {
-    const tokenContract = new ethers.Contract(tokenAddress, TOKEN_IN_ABI, provider);
+    const tokenContract = new ethers.Contract(tokenInfo.address, TOKEN_ABI, provider);
     const balance = await tokenContract.balanceOf(wallet.address);
-    log(`${tokenSymbol} Balance: ${formatBigInt(balance, tokenDecimals)} ${tokenSymbol}`);
+    log(`${tokenInfo.symbol} Balance: ${formatBigInt(balance, tokenInfo.decimals)} ${tokenInfo.symbol}`);
     return balance;
   } catch (error) {
-    logError(`Error checking ${tokenSymbol} balance`, error);
-    throw new Error(`Failed to check ${tokenSymbol} balance`);
+    logError(`Error checking ${tokenInfo.symbol} balance`, error);
+    throw new Error(`Failed to check ${tokenInfo.symbol} balance`);
   }
 }
 
 // Approve token spending
-async function approveToken(tokenAddress, tokenABI, amount, wallet) {
+async function approveToken(tokenInfo, amount, wallet) {
   try {
-    log(`Approving ${formatBigInt(amount, WETH.decimals)} ${WETH.symbol} for spending...`);
+    log(`Approving ${formatBigInt(amount, tokenInfo.decimals)} ${tokenInfo.symbol} for spending...`);
     
-    const tokenContract = new ethers.Contract(tokenAddress, tokenABI, wallet);
+    const tokenContract = new ethers.Contract(tokenInfo.address, TOKEN_ABI, wallet);
     
     // Check balance first
-    const balance = await checkBalance(tokenAddress, WETH.decimals, WETH.symbol, wallet);
+    const balance = await checkBalance(tokenInfo, wallet);
     
     if (balance < amount) {
-      throw new Error(`Insufficient ${WETH.symbol} balance: ${formatBigInt(balance, WETH.decimals)} < ${formatBigInt(amount, WETH.decimals)}`);
+      throw new Error(`Insufficient ${tokenInfo.symbol} balance: ${formatBigInt(balance, tokenInfo.decimals)} < ${formatBigInt(amount, tokenInfo.decimals)}`);
     }
 
     // Check current allowance
     const allowance = await tokenContract.allowance(wallet.address, SWAP_ROUTER_CONTRACT_ADDRESS);
-    log(`Current allowance: ${formatBigInt(allowance, WETH.decimals)} ${WETH.symbol}`);
+    log(`Current allowance: ${formatBigInt(allowance, tokenInfo.decimals)} ${tokenInfo.symbol}`);
     
     if (allowance >= amount) {
-      log(`Sufficient allowance already exists for ${WETH.symbol}`);
+      log(`Sufficient allowance already exists for ${tokenInfo.symbol}`);
       return { success: true, message: "Already approved" };
     }
 
@@ -232,7 +249,7 @@ async function approveToken(tokenAddress, tokenABI, amount, wallet) {
     
     // Verify new allowance
     const newAllowance = await tokenContract.allowance(wallet.address, SWAP_ROUTER_CONTRACT_ADDRESS);
-    log(`New allowance: ${formatBigInt(newAllowance, WETH.decimals)} ${WETH.symbol}`);
+    log(`New allowance: ${formatBigInt(newAllowance, tokenInfo.decimals)} ${tokenInfo.symbol}`);
     
     return { success: true, txHash: receipt.hash };
   } catch (error) {
@@ -250,7 +267,7 @@ async function getPoolInfo(tokenIn, tokenOut) {
   try {
     log(`Checking pool for ${tokenIn.symbol}/${tokenOut.symbol}...`);
     
-    // Check pool with both fee tiers
+    // Check pool with multiple fee tiers
     const feeTiers = [500, 3000, 10000];
     let poolAddress = null;
     let usedFee = null;
@@ -338,7 +355,7 @@ async function getPoolInfo(tokenIn, tokenOut) {
 // ========================
 
 // Get quote for swap
-async function getQuote(quoterContract, params) {
+async function getQuote(quoterContract, params, tokenOut) {
   try {
     log(`Getting quote for swap...`, params);
     
@@ -347,7 +364,7 @@ async function getQuote(quoterContract, params) {
     // Safely handle BigInt in the result
     const amountOut = quotedResult[0];
     
-    log(`Quote received: ${formatBigInt(amountOut, USDC.decimals)} ${USDC.symbol}`);
+    log(`Quote received: ${formatBigInt(amountOut, tokenOut.decimals)} ${tokenOut.symbol}`);
     
     return amountOut;
   } catch (error) {
@@ -363,18 +380,18 @@ async function getQuote(quoterContract, params) {
 }
 
 // Try exactOutputSingle swap
-async function tryExactOutputSwap(quoterContract, swapRouter, poolInfo, desiredOutputAmount, signer) {
+async function tryExactOutputSwap(quoterContract, swapRouter, poolInfo, desiredOutputAmount, tokenIn, tokenOut, signer) {
   try {
     log(`Trying exactOutputSingle swap instead...`);
     
     // Convert output amount to proper decimal format
-    const amountOut = ethers.parseUnits(desiredOutputAmount.toString(), USDC.decimals);
+    const amountOut = ethers.parseUnits(desiredOutputAmount.toString(), tokenOut.decimals);
     
     // Get quote for exact output
     log(`Getting quote for exactOutputSingle...`);
     const quoteParams = {
-      tokenIn: WETH.address,
-      tokenOut: USDC.address,
+      tokenIn: tokenIn.address,
+      tokenOut: tokenOut.address,
       fee: poolInfo.fee,
       recipient: signer.address,
       amountOut: amountOut,
@@ -389,15 +406,15 @@ async function tryExactOutputSwap(quoterContract, swapRouter, poolInfo, desiredO
     const adjustedAmountInMaximum = (amountInMaximum * slippageFactor) / BigInt(1000);
     
     log(`Quote for exactOutputSingle:`, {
-      amountOut: formatBigInt(amountOut, USDC.decimals),
-      amountInMaximum: formatBigInt(amountInMaximum, WETH.decimals),
-      adjustedAmountInMaximum: formatBigInt(adjustedAmountInMaximum, WETH.decimals)
+      amountOut: formatBigInt(amountOut, tokenOut.decimals),
+      amountInMaximum: formatBigInt(amountInMaximum, tokenIn.decimals),
+      adjustedAmountInMaximum: formatBigInt(adjustedAmountInMaximum, tokenIn.decimals)
     });
     
     // Prepare swap parameters
     const swapParams = {
-      tokenIn: WETH.address,
-      tokenOut: USDC.address,
+      tokenIn: tokenIn.address,
+      tokenOut: tokenOut.address,
       fee: poolInfo.fee,
       recipient: signer.address,
       deadline: Math.floor(Date.now() / 1000 + 60 * 10),
@@ -409,7 +426,7 @@ async function tryExactOutputSwap(quoterContract, swapRouter, poolInfo, desiredO
     log(`Preparing exactOutputSingle transaction...`);
     
     // Approve enough tokens
-    await approveToken(WETH.address, TOKEN_IN_ABI, adjustedAmountInMaximum, signer);
+    await approveToken(tokenIn, adjustedAmountInMaximum, signer);
     
     // Populate transaction
     const transaction = await swapRouter.exactOutputSingle.populateTransaction(swapParams);
@@ -442,7 +459,7 @@ async function tryExactOutputSwap(quoterContract, swapRouter, poolInfo, desiredO
 // ========================
 
 // Execute swap
-async function executeSwap(swapRouter, params, signer) {
+async function executeSwap(swapRouter, params, signer, tokenIn, tokenOut) {
   try {
     log(`Preparing swap transaction...`, params);
     
@@ -525,7 +542,7 @@ async function executeSwap(swapRouter, params, signer) {
         
         // Try smaller amount - reduce by 90%
         const smallerAmount = params.amountIn * BigInt(10) / BigInt(100);
-        log(`Trying to get quote for smaller amount: ${formatBigInt(smallerAmount, WETH.decimals)} WETH`);
+        log(`Trying to get quote for smaller amount: ${formatBigInt(smallerAmount, tokenIn.decimals)} ${tokenIn.symbol}`);
         
         try {
           const smallerQuote = await quoterContract.quoteExactInputSingle.staticCall({
@@ -536,7 +553,7 @@ async function executeSwap(swapRouter, params, signer) {
             sqrtPriceLimitX96: BigInt(0)
           });
           
-          log(`Quote for smaller amount: ${formatBigInt(smallerQuote[0], USDC.decimals)} USDC`);
+          log(`Quote for smaller amount: ${formatBigInt(smallerQuote[0], tokenOut.decimals)} ${tokenOut.symbol}`);
           log(`DIAGNOSTIC: Smaller amount quote successful, likely issue is with swap amount/price impact`);
         } catch (smallerQuoteError) {
           logError('Even smaller quote failed', smallerQuoteError);
@@ -565,47 +582,46 @@ LIKELY ISSUES:
 
 async function main(swapAmount) {
   try {
-    log(`Starting swap process for ${swapAmount} ${WETH.symbol}...`);
+    // Fetch token information dynamically
+    const tokenIn = await fetchTokenInfo(TOKEN_IN_ADDRESS);
+    const tokenOut = await fetchTokenInfo(TOKEN_OUT_ADDRESS);
+    
+    log(`Starting swap process for ${swapAmount} ${tokenIn.symbol} to ${tokenOut.symbol}...`);
     
     // Get initial balances
-    const initialBalances = await logBalances(signer);
+    const initialBalances = await logBalances(signer, tokenIn, tokenOut);
     
-    // Convert input amount to BigInt
+    // Convert input amount to BigInt with proper decimals
     const inputAmount = swapAmount;
-    const amountIn = ethers.parseUnits(inputAmount.toString(), WETH.decimals);
+    const amountIn = ethers.parseUnits(inputAmount.toString(), tokenIn.decimals);
     
     log(`Swap amount in wei: ${amountIn.toString()}`);
     
     // Approve token for spending
-    await approveToken(WETH.address, TOKEN_IN_ABI, amountIn, signer);
+    await approveToken(tokenIn, amountIn, signer);
     
     // Get pool information
     const { poolContract, token0, token1, fee, liquidity, slot0, tokenInIsToken0 } = 
-      await getPoolInfo(WETH, USDC);
+      await getPoolInfo(tokenIn, tokenOut);
     
-    log(`Fetching quote for: ${WETH.symbol} to ${USDC.symbol} with fee ${fee}`);
-    
-    // Check if fee from pool matches expected fee
-    if (fee !== 3000) {
-      log(`WARNING: Pool fee (${fee}) differs from expected fee (3000)`);
-    }
+    log(`Fetching quote for: ${tokenIn.symbol} to ${tokenOut.symbol} with fee ${fee}`);
     
     // Create quote parameters
     const quoteParams = {
-      tokenIn: WETH.address,
-      tokenOut: USDC.address,
+      tokenIn: tokenIn.address,
+      tokenOut: tokenOut.address,
       fee: fee,
       amountIn: amountIn,
       sqrtPriceLimitX96: BigInt(0)
     };
     
     // Get quote
-    const quotedAmountOut = await getQuote(quoterContract, quoteParams);
+    const quotedAmountOut = await getQuote(quoterContract, quoteParams, tokenOut);
     
     // Calculate minimum amount out with slippage protection
     // Convert slippage percentage to factor (e.g., 5% -> 0.95)
     const slippageFactor = BigInt(Math.floor((1 - SLIPPAGE_TOLERANCE) * 1000));
-    const amountOutMinimum = (quotedAmountOut * slippageFactor) / BigInt(1000);
+    let amountOutMinimum = (quotedAmountOut * slippageFactor) / BigInt(1000);
     
     // Ensure amountOutMinimum is never zero
     if (amountOutMinimum === BigInt(0)) {
@@ -615,16 +631,16 @@ async function main(swapAmount) {
     }
     
     log(`Quote details:`, {
-      amountIn: formatBigInt(amountIn, WETH.decimals),
-      quotedAmountOut: formatBigInt(quotedAmountOut, USDC.decimals),
+      amountIn: formatBigInt(amountIn, tokenIn.decimals),
+      quotedAmountOut: formatBigInt(quotedAmountOut, tokenOut.decimals),
       slippageTolerance: `${SLIPPAGE_TOLERANCE * 100}%`,
-      amountOutMinimum: formatBigInt(amountOutMinimum, USDC.decimals)
+      amountOutMinimum: formatBigInt(amountOutMinimum, tokenOut.decimals)
     });
     
     // Prepare swap parameters
     const swapParams = {
-      tokenIn: WETH.address,
-      tokenOut: USDC.address,
+      tokenIn: tokenIn.address,
+      tokenOut: tokenOut.address,
       fee: fee,
       recipient: signer.address,
       deadline: Math.floor(Date.now() / 1000 + 60 * 10), // 10 minutes from now
@@ -635,39 +651,89 @@ async function main(swapAmount) {
     
     log(`Final swap parameters:`, {
       ...swapParams,
-      amountIn: formatBigInt(amountIn, WETH.decimals),
-      amountOutMinimum: formatBigInt(amountOutMinimum, USDC.decimals),
+      amountIn: formatBigInt(amountIn, tokenIn.decimals),
+      amountOutMinimum: formatBigInt(amountOutMinimum, tokenOut.decimals),
       deadline: new Date(swapParams.deadline * 1000).toISOString()
     });
     
     // Initialize swap router contract
     const swapRouter = new ethers.Contract(SWAP_ROUTER_CONTRACT_ADDRESS, SWAP_ROUTER_ABI, signer);
     
-    // Execute swap
-    const receipt = await executeSwap(swapRouter, swapParams, signer);
-    
-    // Get final balances
-    const finalBalances = await logBalances(signer);
-    
-    // Calculate and display the difference
-    const initialWETH = initialBalances.wethBalance;
-    const initialUSDC = initialBalances.usdcBalance;
-    const finalWETH = finalBalances.wethBalance;
-    const finalUSDC = finalBalances.usdcBalance;
-    
-    log(`Swap Results:`, {
-      WETHChange: `-${formatBigInt(initialWETH - finalWETH, WETH.decimals)} ${WETH.symbol}`,
-      USDCChange: `+${formatBigInt(finalUSDC - initialUSDC, USDC.decimals)} ${USDC.symbol}`
-    });
-    
-    log(`Swap completed successfully!`);
-    
-    return {
-      success: true,
-      txHash: receipt.hash,
-      amountIn: formatBigInt(amountIn, WETH.decimals),
-      amountOut: formatBigInt(finalUSDC - initialUSDC, USDC.decimals)
-    };
+    try {
+      // Execute swap
+      const receipt = await executeSwap(swapRouter, swapParams, signer, tokenIn, tokenOut);
+      
+      // Get final balances
+      const finalBalances = await logBalances(signer, tokenIn, tokenOut);
+      
+      // Calculate and display the difference
+      const initialTokenIn = initialBalances.tokenInBalance;
+      const initialTokenOut = initialBalances.tokenOutBalance;
+      const finalTokenIn = finalBalances.tokenInBalance;
+      const finalTokenOut = finalBalances.tokenOutBalance;
+      
+      log(`Swap Results:`, {
+        [`${tokenIn.symbol}Change`]: `-${formatBigInt(initialTokenIn - finalTokenIn, tokenIn.decimals)} ${tokenIn.symbol}`,
+        [`${tokenOut.symbol}Change`]: `+${formatBigInt(finalTokenOut - initialTokenOut, tokenOut.decimals)} ${tokenOut.symbol}`
+      });
+      
+      log(`Swap completed successfully!`);
+      
+      return {
+        success: true,
+        txHash: receipt.hash,
+        amountIn: formatBigInt(amountIn, tokenIn.decimals),
+        amountOut: formatBigInt(finalTokenOut - initialTokenOut, tokenOut.decimals)
+      };
+    } catch (swapError) {
+      logError('ExactInputSingle swap failed, trying alternative approach', swapError);
+      
+      if (TRY_EXACT_OUTPUT) {
+        // Try exactOutputSingle as an alternative approach
+        log(`Attempting alternative approach: exactOutputSingle`);
+        
+        // Use a slightly smaller output amount than quoted to account for price impact
+        const desiredOutputAmount = Number(formatBigInt(quotedAmountOut, tokenOut.decimals)) * 0.9;
+        
+        log(`Using desired output amount: ${desiredOutputAmount} ${tokenOut.symbol}`);
+        
+        const receipt = await tryExactOutputSwap(
+          quoterContract, 
+          swapRouter, 
+          { fee: fee },
+          desiredOutputAmount, 
+          tokenIn,
+          tokenOut,
+          signer
+        );
+        
+        // Get final balances
+        const finalBalances = await logBalances(signer, tokenIn, tokenOut);
+        
+        // Calculate and display the difference
+        const initialTokenIn = initialBalances.tokenInBalance;
+        const initialTokenOut = initialBalances.tokenOutBalance;
+        const finalTokenIn = finalBalances.tokenInBalance;
+        const finalTokenOut = finalBalances.tokenOutBalance;
+        
+        log(`Swap Results (using exactOutputSingle):`, {
+          [`${tokenIn.symbol}Change`]: `-${formatBigInt(initialTokenIn - finalTokenIn, tokenIn.decimals)} ${tokenIn.symbol}`,
+          [`${tokenOut.symbol}Change`]: `+${formatBigInt(finalTokenOut - initialTokenOut, tokenOut.decimals)} ${tokenOut.symbol}`
+        });
+        
+        log(`Swap completed successfully using exactOutputSingle!`);
+        
+        return {
+          success: true,
+          txHash: receipt.hash,
+          amountIn: formatBigInt(initialTokenIn - finalTokenIn, tokenIn.decimals),
+          amountOut: formatBigInt(finalTokenOut - initialTokenOut, tokenOut.decimals),
+          method: 'exactOutputSingle'
+        };
+      } else {
+        throw new Error('Swap failed and TRY_EXACT_OUTPUT is disabled');
+      }
+    }
   } catch (error) {
     logError('An error occurred during swap execution', error);
     throw error;
@@ -678,7 +744,7 @@ async function main(swapAmount) {
 // SCRIPT EXECUTION
 // ========================
 
-log(`Starting script with swap amount: ${SWAP_AMOUNT} ${WETH.symbol}`);
+log(`Starting script with swap amount: ${SWAP_AMOUNT}`);
 
 main(SWAP_AMOUNT).catch((error) => {
   console.error('Script failed:', error);
